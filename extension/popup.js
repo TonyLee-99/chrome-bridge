@@ -16,8 +16,44 @@ const ago = (t) => {
 };
 
 let lastKey = '';
+let sitesLoaded = false;
+
+// 暂停 / 完全模式按钮每秒都要刷新 (倒计时), 不受下面「内容没变不重绘」的限制
+function renderMode(st) {
+  const left = st.fullModeUntil ? Math.max(0, Math.ceil((st.fullModeUntil - Date.now()) / 60000)) : 0;
+  $('pauseBtn').textContent = st.paused ? '已暂停 · 点击恢复' : '暂停全部';
+  $('pauseBtn').className = st.paused ? 'paused' : '';
+  $('fullBtn').textContent = left ? `完全模式 · 剩 ${left} 分钟 · 关闭` : '开启完全模式';
+  $('fullBtn').className = left ? 'active' : 'danger';
+  $('modeMsg').className = 'msg ' + (left ? 'err' : '');
+  $('modeMsg').textContent = st.paused
+    ? '所有 agent 的操作都会被拒绝。'
+    : left
+      ? 'agent 现在可以读取 cookie、历史和浏览数据。用完请关闭。'
+      : '';
+  if (!sitesLoaded) {
+    $('sites').value = st.blockedSites.join('\n');
+    sitesLoaded = true;
+  }
+}
+
+async function renderLog() {
+  if (!$('logBox').open) return;
+  const list = await ask({ type: 'activity', limit: 100 }).catch(() => []);
+  if (!list.length) return $('log').replaceChildren(el('div', 'meta', '还没有操作'));
+  $('log').replaceChildren(
+    ...list.map((a) => {
+      const d = el('div', a.outcome);
+      const t = el('time', '', new Date(a.at).toLocaleTimeString());
+      const mark = { denied: '✕ 已拒绝 ', error: '! 出错 ' }[a.outcome] || '';
+      d.append(t, document.createTextNode(`${mark}${a.what}${a.tabId !== undefined ? ` · 标签 ${a.tabId}` : ''} · ${a.agent}`));
+      return d;
+    })
+  );
+}
 
 function render(s) {
+  renderMode(s.settings);
   // 内容没变就不重绘, 免得打断正在输入的配对码
   const key = JSON.stringify(s, (k, v) => (k === 'lastSeen' ? undefined : v));
   if (key === lastKey) return;
@@ -80,9 +116,13 @@ function render(s) {
   $('hint').innerHTML = `v${s.version} · 扫描 <code>127.0.0.1:${s.basePort}-${s.basePort + s.span - 1}</code>`;
 }
 
+let current = null;
+
 async function refresh() {
   try {
-    render(await ask({ type: 'status' }));
+    current = await ask({ type: 'status' });
+    render(current);
+    renderLog();
   } catch {
     $('state').textContent = '扩展后台未响应';
   }
@@ -110,6 +150,26 @@ $('code').addEventListener('input', (e) => {
 });
 $('code').addEventListener('keydown', (e) => e.key === 'Enter' && pair());
 $('pairBtn').onclick = pair;
+
+async function setSettings(patch) {
+  const r = await ask({ type: 'settings', patch });
+  if (r?.ok) {
+    if (current) current.settings = r.settings; // 下次刷新前连点也按最新状态切换
+    renderMode(r.settings);
+  }
+  return r;
+}
+
+$('pauseBtn').onclick = () => setSettings({ paused: !current?.settings.paused });
+$('fullBtn').onclick = () => setSettings({ fullMode: !current?.settings.fullModeUntil });
+$('sitesBtn').onclick = async () => {
+  const r = await setSettings({ blockedSites: $('sites').value.split(/[\n,]+/) });
+  if (!r?.ok) return;
+  $('sites').value = r.settings.blockedSites.join('\n');
+  $('sitesMsg').className = 'msg ok';
+  $('sitesMsg').textContent = ` 已保存 ${r.settings.blockedSites.length} 个`;
+};
+$('logBox').addEventListener('toggle', renderLog);
 
 refresh();
 setInterval(refresh, 1000);
