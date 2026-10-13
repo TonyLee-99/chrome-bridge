@@ -689,9 +689,10 @@ chrome.alarms.onAlarm.addListener(scan);
 chrome.runtime.onStartup.addListener(scan);
 chrome.runtime.onInstalled.addListener(scan);
 
-// 只接受本扩展自己页面 (弹窗) 的消息
+// 只接受本扩展自己页面 (弹窗, 或把弹窗当整页打开) 的消息. 按来源 URL 判断:
+// 内容脚本的 sender.url 是它所在的网页, 进不来
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
-  if (sender.id !== chrome.runtime.id || sender.tab) return;
+  if (sender.id !== chrome.runtime.id || !String(sender.url || '').startsWith(chrome.runtime.getURL(''))) return;
   const run = {
     status: () => (scan(), popupStatus()),
     pair: () => pairWith(msg.code),

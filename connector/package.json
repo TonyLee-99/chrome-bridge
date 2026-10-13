@@ -1,6 +1,6 @@
 {
   "name": "chrome-bridge-connector",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -15,5 +15,16 @@
   "exports": {
     ".": "./index.js",
     "./core.js": "./core.js"
+  },
+  "author": "TonyLee-99",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TonyLee-99/chrome-bridge.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "cd .. && node test/protocol.test.mjs && node test/agent.test.mjs && node test/policy.test.mjs && node test/integration.test.mjs && node test/interact.test.mjs && node test/extension.test.mjs"
   }
 }

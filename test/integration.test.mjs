@@ -109,6 +109,11 @@ const core = await import('../connector/core.js').catch((x) => ({ err: x.message
 check('core.js 导出 createBridge', typeof core.createBridge === 'function', core.err || '');
 
 // 9. 进程内使用 core: close() 之后端口释放, 进程可以正常退出
+// 进程内的连接器以「运行测试的 agent」身份启动, 会给它建凭据: 测试前没有的话, 结束时删掉,
+// 已有的 (用户真实的配对) 不动
+const agentMod = await import('../connector/agent.js');
+const runner = await agentMod.identifyAgent().catch(() => null);
+const runnerHadCred = !!(runner && (await agentMod.loadCredential(runner.id)));
 const inproc = core.createBridge({ name: 'inproc-test', version: '0' });
 for (let i = 0; i < 50 && !inproc.port; i++) await sleep(100);
 const ipPort = inproc.port;
@@ -122,7 +127,9 @@ for (const x of [e, e2b, e3, e4]) try { x.close(); } catch {}
 
 // 清理测试凭据 (钥匙串)
 if (process.platform === 'darwin') {
-  for (const id of [`path:${root}test/integration.test.mjs`, `path:${root}test/launch.mjs`]) {
+  const ids = [`path:${root}test/integration.test.mjs`, `path:${root}test/launch.mjs`];
+  if (runner && !runnerHadCred) ids.push(runner.id);
+  for (const id of ids) {
     const acct = createHash('sha256').update(id).digest('hex').slice(0, 32);
     try { execFileSync('security', ['delete-generic-password', '-s', 'chrome-bridge', '-a', acct], { stdio: 'ignore' }); } catch {}
   }
