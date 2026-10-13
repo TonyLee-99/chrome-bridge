@@ -22,6 +22,9 @@ const run = (cmd, args) =>
 
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'fish', 'env', 'timeout', 'nohup']);
 const NODE_LIKE = new Set(['node', 'bun', 'deno']);
+// 通用解释器: 它们自己的签名 (如 node 带 Node.js 基金会签名) 说明不了跑的是哪个程序,
+// 只按签名识别的话, 任何 node 脚本都会继承某个 node 写的 agent 的配对. 必须再带上脚本路径.
+const INTERPRETERS = /^(node|bun|deno|python[\d.]*|ruby|perl|php|osascript|java|tclsh|lua)$/;
 const NODE_WRAPPERS = /(^|\/)(npx|npm|pnpm|yarn|bunx|npx-cli\.js|npm-cli\.js)$/;
 const SERVICE = 'chrome-bridge';
 
@@ -64,7 +67,8 @@ export async function identifyAgent() {
   for (let hops = 0; p && hops < 6 && isLauncher(p); hops++) p = p.ppid > 1 ? await proc(p.ppid) : null;
   if (!p || p.pid <= 1) return null;
 
-  if (process.platform === 'darwin') {
+  const interpreted = INTERPRETERS.test(p.base);
+  if (process.platform === 'darwin' && !interpreted) {
     const sig = await codesignOf(p.pid);
     // 校验期间父进程若已退出, pid 可能被复用: 再确认一次链路仍在
     if (process.ppid === 1) return null;
@@ -77,16 +81,23 @@ export async function identifyAgent() {
     }
   }
 
-  if (NODE_LIKE.has(p.base)) {
+  if (interpreted) {
     const script = scriptOf(p.args);
-    if (script) {
-      const real = await fs.realpath(script).catch(() => script);
-      return { id: `path:${real}`, label: `${path.basename(real)} (${p.base}, 未签名)`, strength: 'path' };
-    }
+    // 解释器没有脚本参数 (REPL, -e 内联代码): 识别不了是谁, 只给临时身份
+    if (!script) return null;
+    const real = await fs.realpath(path.resolve(await cwdOf(p.pid), script)).catch(() => script);
+    return { id: `path:${real}`, label: `${path.basename(real)} (${p.base}, 按脚本路径)`, strength: 'path' };
   }
   const exe = await exePath(p.pid);
   if (!exe) return null;
   return { id: `path:${exe}`, label: `${path.basename(exe)} (未签名)`, strength: 'path' };
+}
+
+// 相对路径的脚本要按 agent 进程自己的工作目录解析, 而不是连接器的
+async function cwdOf(pid) {
+  if (process.platform === 'linux') return fs.readlink(`/proc/${pid}/cwd`).catch(() => process.cwd());
+  const r = await run('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn']);
+  return r.stdout.split('\n').find((l) => l.startsWith('n'))?.slice(1) || process.cwd();
 }
 
 async function exePath(pid) {
@@ -118,7 +129,9 @@ export async function saveCredential(agentId, cred) {
   if (process.platform === 'darwin') {
     const value = Buffer.from(json).toString('base64'); // base64 不含空格引号, 无需转义
     const label = 'Chrome Bridge agent key';
-    const cmd = `add-generic-password -U -s ${SERVICE} -a ${account(agentId)} -l "${label}" -j "${agentId.replace(/"/g, '')}" -w ${value}\n`;
+    // agentId 可能来自文件路径: 去掉引号、反斜杠和控制字符 (换行会让 security -i 多执行一条命令)
+    const comment = agentId.replace(/["\\\x00-\x1f\x7f]/g, '');
+    const cmd = `add-generic-password -U -s ${SERVICE} -a ${account(agentId)} -l "${label}" -j "${comment}" -w ${value}\n`;
     await new Promise((resolve, reject) => {
       const p = spawn('security', ['-i'], { stdio: ['pipe', 'ignore', 'pipe'] });
       let err = '';
