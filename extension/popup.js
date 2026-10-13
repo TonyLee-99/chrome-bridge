@@ -16,25 +16,12 @@ const ago = (t) => {
 };
 
 let lastKey = '';
-let sitesLoaded = false;
 
-// 暂停 / 完全模式按钮每秒都要刷新 (倒计时), 不受下面「内容没变不重绘」的限制
+// 暂停按钮单独刷新, 不受下面「内容没变不重绘」的限制
 function renderMode(st) {
-  const left = st.fullModeUntil ? Math.max(0, Math.ceil((st.fullModeUntil - Date.now()) / 60000)) : 0;
   $('pauseBtn').textContent = st.paused ? '已暂停 · 点击恢复' : '暂停全部';
   $('pauseBtn').className = st.paused ? 'paused' : '';
-  $('fullBtn').textContent = left ? `关闭完全模式 · ${left}分` : '开启完全模式';
-  $('fullBtn').className = left ? 'active' : 'danger';
-  $('modeMsg').className = 'msg ' + (left ? 'err' : '');
-  $('modeMsg').textContent = st.paused
-    ? '所有 agent 的操作都会被拒绝。'
-    : left
-      ? 'agent 现在可以读取 cookie、历史和浏览数据。用完请关闭。'
-      : '';
-  if (!sitesLoaded) {
-    $('sites').value = st.blockedSites.join('\n');
-    sitesLoaded = true;
-  }
+  $('modeMsg').textContent = st.paused ? '所有 agent 的操作都会被拒绝。' : '';
 }
 
 async function renderLog() {
@@ -45,7 +32,7 @@ async function renderLog() {
     ...list.map((a) => {
       const d = el('div', a.outcome);
       const t = el('time', '', new Date(a.at).toLocaleTimeString());
-      const mark = { denied: '✕ 已拒绝 ', error: '! 出错 ' }[a.outcome] || '';
+      const mark = { paused: '⏸ 暂停中被拒 ', error: '! 出错 ' }[a.outcome] || '';
       d.append(t, document.createTextNode(`${mark}${a.what}${a.tabId !== undefined ? ` · 标签 ${a.tabId}` : ''} · ${a.agent}`));
       return d;
     })
@@ -161,14 +148,6 @@ async function setSettings(patch) {
 }
 
 $('pauseBtn').onclick = () => setSettings({ paused: !current?.settings.paused });
-$('fullBtn').onclick = () => setSettings({ fullMode: !current?.settings.fullModeUntil });
-$('sitesBtn').onclick = async () => {
-  const r = await setSettings({ blockedSites: $('sites').value.split(/[\n,]+/) });
-  if (!r?.ok) return;
-  $('sites').value = r.settings.blockedSites.join('\n');
-  $('sitesMsg').className = 'msg ok';
-  $('sitesMsg').textContent = ` 已保存 ${r.settings.blockedSites.length} 个`;
-};
 $('logBox').addEventListener('toggle', renderLog);
 
 refresh();

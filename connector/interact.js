@@ -137,6 +137,8 @@ function pageScript(op, a) {
     }
     case 'locate':
       return locate(find());
+    case 'element':
+      return find();
     case 'focus': {
       const el = find();
       el.scrollIntoView({ block: 'center', behavior: 'instant' });
@@ -247,7 +249,7 @@ const refProps = {
   ref: { type: 'number', description: 'chrome_snapshot 给出的元素编号 (推荐)' },
   selector: { type: 'string', description: 'CSS 选择器 (没有 ref 时使用)' },
 };
-const tabIdProp = { type: 'number', description: '标签页 id, 由 chrome_tabs 获得' };
+const tabIdProp = { type: 'number', description: '标签页 id; 省略则用本会话上一次操作的标签' };
 
 export const INTERACT_TOOLS = [
   {
@@ -259,10 +261,11 @@ export const INTERACT_TOOLS = [
       type: 'object',
       properties: {
         tabId: tabIdProp,
+        query: { type: 'string', description: '只列名字/文字里含这段文字的元素 (不区分大小写), 找特定按钮时用' },
         viewportOnly: { type: 'boolean', description: '只列当前视口内的元素, 默认 false' },
         max: { type: 'number', description: '最多列多少条, 默认 250' },
       },
-      required: ['tabId'],
+      required: [],
     },
   },
   {
@@ -271,7 +274,7 @@ export const INTERACT_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: { tabId: tabIdProp, selector: { type: 'string', description: '只读这个元素, 缺省整页' }, maxChars: { type: 'number' } },
-      required: ['tabId'],
+      required: [],
     },
   },
   {
@@ -287,7 +290,7 @@ export const INTERACT_TOOLS = [
         button: { type: 'string', enum: ['left', 'right', 'middle'], description: '默认 left' },
         double: { type: 'boolean', description: '双击' },
       },
-      required: ['tabId'],
+      required: [],
     },
   },
   {
@@ -304,7 +307,7 @@ export const INTERACT_TOOLS = [
         clear: { type: 'boolean', description: '先清空, 默认 false' },
         submit: { type: 'boolean', description: '输完按回车, 默认 false' },
       },
-      required: ['tabId', 'text'],
+      required: ['text'],
     },
   },
   {
@@ -313,7 +316,7 @@ export const INTERACT_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: { tabId: tabIdProp, key: { type: 'string' }, repeat: { type: 'number', description: '重复次数, 默认 1' } },
-      required: ['tabId', 'key'],
+      required: ['key'],
     },
   },
   {
@@ -329,7 +332,16 @@ export const INTERACT_TOOLS = [
         x: { type: 'number' },
         y: { type: 'number' },
       },
-      required: ['tabId'],
+      required: [],
+    },
+  },
+  {
+    name: 'chrome_upload',
+    description: '给文件选择框 (<input type=file>) 选上本机文件, 等同于用户在弹出的文件对话框里选了它们。files 用绝对路径 (可用 ~)。',
+    inputSchema: {
+      type: 'object',
+      properties: { tabId: tabIdProp, ...refProps, files: { type: 'array', items: { type: 'string' } } },
+      required: ['files'],
     },
   },
   {
@@ -344,7 +356,7 @@ export const INTERACT_TOOLS = [
         gone: { type: 'boolean' },
         timeoutMs: { type: 'number' },
       },
-      required: ['tabId'],
+      required: [],
     },
   },
 ];
@@ -379,7 +391,29 @@ export function createInteract(cdp) {
 
   return {
     async chrome_snapshot(a) {
-      return run(a.tabId, 'snapshot', { viewportOnly: !!a.viewportOnly, max: Math.min(a.max || 250, 1000) });
+      const r = await run(a.tabId, 'snapshot', { viewportOnly: !!a.viewportOnly, max: a.query ? 5000 : Math.min(a.max || 250, 1000) });
+      if (a.query) {
+        const q = a.query.toLowerCase();
+        const hits = r.elements.split('\n').filter((l) => l.toLowerCase().includes(q));
+        r.elements = hits.length ? hits.join('\n') : `(没有含「${a.query}」的元素)`;
+        r.count = hits.length;
+      }
+      return r;
+    },
+
+    async chrome_upload(a) {
+      const t = target(a);
+      if (!t) throw new Error('需要 ref 或 selector 指向 <input type=file>');
+      const files = (a.files || []).map((f) => f.replace(/^~(?=\/)/, process.env.HOME || '~'));
+      if (!files.length) throw new Error('files 为空');
+      const r = await cdp(a.tabId, 'Runtime.evaluate', {
+        expression: `(${pageScript.toString()})('element', ${JSON.stringify(t)})`,
+        returnByValue: false,
+        allowUnsafeEvalBlockedByCSP: true,
+      });
+      if (r?.exceptionDetails) throw new Error(String(r.exceptionDetails.exception?.description || r.exceptionDetails.text).split('\n')[0]);
+      await cdp(a.tabId, 'DOM.setFileInputFiles', { files, objectId: r.result.objectId });
+      return { uploaded: files };
     },
 
     async chrome_read(a) {

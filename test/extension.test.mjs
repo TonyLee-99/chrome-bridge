@@ -1,5 +1,5 @@
 // 全链路: 临时 profile 的无头 Chrome 里加载真扩展, 真连接器 (MCP stdio), 走一遍
-// 配对 → 操作页面 → 权限闸门 → 禁止站点 → 完全模式 → 暂停 → 操作日志.
+// 配对 → 操作页面 → 全部 API 开放 → 省略 tabId / 上传 → 暂停 → 操作日志.
 // 端口用 9420 起的一段, 不会和日常在用的 Chrome Bridge (9333 起) 互相看见.
 // 运行: node test/extension.test.mjs   (需要 Chrome 126+; 找不到时跳过; CHROME_PATH 可指定)
 import { spawn, execFileSync } from 'node:child_process';
@@ -103,36 +103,29 @@ try {
   const body = json(await tool('chrome_network', { tabId: tab.tabId, requestId: doc?.requestId, body: true }));
   check('读响应体', /点我/.test(body?.body || ''), body);
 
-  // 3. 闸门 (标准模式)
-  r = await tool('chrome_api', { path: 'cookies.getAll', args: [{}] });
-  check('cookies.getAll 默认被拒并提示完全模式', r.err && /完全模式/.test(r.text), r.text);
-  r = await tool('chrome_cdp', { tabId: tab.tabId, method: 'Network.getAllCookies' });
-  check('CDP 读 cookie 默认被拒', r.err && /完全模式/.test(r.text));
-  r = await tool('chrome_api', { path: 'storage.local.get', args: [null] });
-  check('扩展存储永远不开放', r.err && /不对 agent 开放/.test(r.text), r.text);
-  r = await tool('chrome_cdp', { tabId: tab.tabId, method: 'Target.attachToTarget', params: { targetId: 'x', flatten: true } });
-  check('跳到别的 target 永远拒绝', r.err && /不对 agent 开放/.test(r.text));
-  r = await tool('chrome_api', { path: 'tabs.query', args: [{}] });
-  check('标签 API 正常放行', !r.err);
-
-  // 4. 禁止站点
-  await settings({ blockedSites: ['127.0.0.1'] });
-  r = await tool('chrome_eval', { tabId: tab.tabId, expression: '1' });
-  check('禁止站点上的标签不能操作', r.err && /禁止站点/.test(r.text), r.text);
-  r = await tool('chrome_new_tab', { url: pageUrl });
-  check('不能新开禁止站点', r.err && /禁止站点/.test(r.text));
-  const tabs = json(await tool('chrome_tabs'));
-  const t = tabs?.find((x) => x.tabId === tab.tabId);
-  check('标签列表隐藏禁止站点的标题与网址', t?.blocked && t.title === '(禁止站点)' && t.url === '127.0.0.1', t);
-  await settings({ blockedSites: [] });
-
-  // 5. 完全模式
-  await settings({ fullMode: true });
+  // 3. 全部开放
   r = await tool('chrome_api', { path: 'cookies.getAll', args: [{ domain: '127.0.0.1' }] });
-  check('完全模式下可读 cookie', !r.err && /secret123/.test(r.text), r.text);
-  await settings({ fullMode: false });
-  r = await tool('chrome_api', { path: 'cookies.getAll', args: [{}] });
-  check('关闭完全模式后立即恢复拒绝', r.err);
+  check('cookies.getAll 直接可用', !r.err && /secret123/.test(r.text), r.text);
+  r = await tool('chrome_cdp', { tabId: tab.tabId, method: 'Network.getAllCookies' });
+  check('CDP 读 cookie 直接可用', !r.err && /secret123/.test(r.text));
+  r = await tool('chrome_api', { path: 'history.search', args: [{ text: '', maxResults: 5 }] });
+  check('历史记录可读', !r.err, r.text);
+
+  // 4. 省略 tabId: 默认用当前标签
+  r = await tool('chrome_eval', { expression: 'document.title' });
+  check('省略 tabId 作用于当前标签', r.text === '扩展测试', r.text);
+  const q = json(await tool('chrome_snapshot', { query: '搜索' }));
+  check('快照按文字筛选', q?.count === 1 && /textbox "搜索"/.test(q.elements), q);
+  await tool('chrome_eval', { expression: `document.body.insertAdjacentHTML('beforeend', '<input type=file id=f>')` });
+  const upFile = path.join(tmp, 'hello.txt');
+  fs.writeFileSync(upFile, 'hi');
+  r = await tool('chrome_upload', { selector: '#f', files: [upFile] });
+  const upName = await tool('chrome_eval', { expression: `document.getElementById('f').files[0]?.name` });
+  check('上传文件', !r.err && upName.text === 'hello.txt', r.text + ' ' + upName.text);
+  await tool('chrome_close_tab', {});
+  const nav2 = json(await tool('chrome_navigate', { url: pageUrl, active: false }));
+  check('关掉当前标签后, 导航自动新开标签', !!nav2?.tabId && nav2.tabId !== tab.tabId, nav2);
+  tab.tabId = nav2.tabId;
 
   // 6. 暂停
   await settings({ paused: true });
@@ -143,7 +136,7 @@ try {
 
   // 7. 操作日志
   const log = await inPopup(`chrome.runtime.sendMessage({ type: 'activity', limit: 100 })`);
-  check('操作日志记下了被拒的操作', log.some((x) => x.outcome === 'denied' && /cookies\.getAll/.test(x.what)) && log.some((x) => x.outcome === 'ok'), log.slice(0, 3));
+  check('操作日志记录了操作与暂停期间被拒的命令', log.some((x) => x.outcome === 'paused') && log.some((x) => x.outcome === 'ok' && /cookies\.getAll/.test(x.what)), log.slice(0, 3));
 
   await tool('chrome_close_tab', { tabId: tab.tabId });
 } catch (e) {

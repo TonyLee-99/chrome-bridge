@@ -21,7 +21,6 @@
 
 import * as P from './protocol.js';
 import { ExtensionSide } from './session.js';
-import * as Policy from './policy.js';
 
 const BASE_PORT = 9333;
 const PORT_SPAN = 20; // 必须与连接器 index.js 的 PORT_SPAN 一致
@@ -93,89 +92,48 @@ const trustReady = chrome.storage.local.get(['agents', 'revoked']).then((d) => {
 const saveTrust = () => chrome.storage.local.set({ agents: trust.agents, revoked: trust.revoked.slice(-200) });
 const trustOf = (pub) => (trust.revoked.includes(pub) ? 'revoked' : trust.agents[pub] ? 'trusted' : null);
 
-// ---------- 用户设置: 暂停、完全模式、网站黑名单 ----------
-// 只有弹窗能改 (见 onMessage 的来源检查); chrome.storage 对 agent 永远不开放 (policy.js).
+// ---------- 暂停开关 ----------
+// 不限制任何能力, 只是一个急停: 弹窗里点「暂停」, 所有命令被拒、所有标签放开.
 
-const settings = { paused: false, fullModeUntil: 0, blockedSites: [] };
-const settingsReady = chrome.storage.local.get('settings').then((d) => Object.assign(settings, d.settings || {}));
-const saveSettings = () => chrome.storage.local.set({ settings });
-const fullMode = () => settings.fullModeUntil > Date.now();
+const settings = { paused: false };
+const settingsReady = chrome.storage.local.get('settings').then((d) => (settings.paused = !!d.settings?.paused));
 
 async function setSettings(patch) {
   await settingsReady;
   if ('paused' in patch) {
     settings.paused = !!patch.paused;
-    // 暂停: 立即放开所有标签, 黄条消失
     if (settings.paused) for (const [k, e] of [...attached]) await realDetach(k, e.d, 'paused');
   }
-  if ('fullMode' in patch) settings.fullModeUntil = patch.fullMode ? Date.now() + Policy.FULL_MODE_MINUTES * 60000 : 0;
-  if ('blockedSites' in patch) {
-    settings.blockedSites = [...new Set((patch.blockedSites || []).map(Policy.normalizeSitePattern).filter(Boolean))];
-    // 已附加在黑名单站点上的标签立即放开
-    for (const [k, e] of [...attached]) {
-      if (e.d.tabId === undefined) continue;
-      const tab = await chrome.tabs.get(e.d.tabId).catch(() => null);
-      if (tab && Policy.siteBlocked(tab.url, settings.blockedSites)) await realDetach(k, e.d, 'blocked_site');
-    }
-  }
-  await saveSettings();
+  await chrome.storage.local.set({ settings });
   refreshBadge();
-  return { ok: true, settings: publicSettings() };
+  return { ok: true, settings: { ...settings } };
 }
 
-const publicSettings = () => ({ paused: settings.paused, fullModeUntil: fullMode() ? settings.fullModeUntil : 0, blockedSites: settings.blockedSites });
+class Paused extends Error {}
 
-// ---------- 闸门 ----------
-// 每条命令执行前检查; 拒绝时的错误信息写给 agent 看, 说明原因和用户该怎么放行.
-
-class Denied extends Error {}
-
-const deny = (why) => {
-  throw new Denied(why);
-};
-
-const needFull = (what) =>
-  deny(`「${what}」属于敏感操作 (可读取跨站数据或修改浏览器全局状态), 默认关闭。如确有需要, 请向用户说明原因, 由用户在 Chrome Bridge 弹窗里开启「完全模式」(${Policy.FULL_MODE_MINUTES} 分钟后自动关闭)。不要尝试绕过。`);
-
-async function checkUrl(url, what) {
-  if (!url) return;
-  if (Policy.privilegedUrl(url, chrome.runtime.id)) deny(`${what}是浏览器或其他扩展的内部页面 (${String(url).slice(0, 60)}), 不允许操作。`);
-  const hit = Policy.siteBlocked(url, settings.blockedSites);
-  if (hit) deny(`${what}在用户设置的禁止站点里 (${hit}), 不允许操作。请让用户自己处理这个网站。`);
-}
-
-async function checkDebuggee(p) {
-  if (p.extensionId !== undefined) deny('不允许调试其他扩展。');
-  if (p.tabId !== undefined) {
-    const tab = await chrome.tabs.get(p.tabId).catch(() => null);
-    if (tab) await checkUrl(tab.pendingUrl || tab.url, '该标签页');
-  } else if (p.targetId !== undefined) {
-    const t = (await chrome.debugger.getTargets()).find((x) => x.id === p.targetId);
-    if (t) await checkUrl(t.url, '该 target');
+async function gate(method) {
+  await settingsReady;
+  if (settings.paused && method !== 'ping' && method !== 'bridge.status') {
+    throw new Paused('用户在 Chrome Bridge 弹窗里点了暂停。请等用户恢复后再试, 不要反复重试。');
   }
 }
 
-async function gate(method, p) {
-  await settingsReady;
-  if (method === 'ping' || method === 'bridge.status') return;
-  if (settings.paused) deny('用户已在 Chrome Bridge 弹窗里暂停了所有 agent 操作。请等用户恢复后再试, 不要反复重试。');
-  for (const url of Policy.navigationTargets(method, p)) await checkUrl(url, '目标网址');
+// 给操作日志用的一行摘要
+function summarize(method, p) {
+  const cut = (s, n = 80) => (s && String(s).length > n ? String(s).slice(0, n) + '…' : s);
   switch (method) {
+    case 'cdp.send':
+      return p.cdpMethod === 'Runtime.evaluate' ? `执行 JS: ${cut(p.cdpParams?.expression, 60)}` : p.cdpMethod;
     case 'api.call':
-    case 'events.subscribe': {
-      const c = Policy.classifyApi(p.path);
-      if (c === 'never') deny(`chrome.${p.path} 不对 agent 开放。`);
-      if (c === 'sensitive' && !fullMode()) needFull('chrome.' + p.path);
-      return;
-    }
-    case 'cdp.send': {
-      const c = Policy.classifyCdp(p.cdpMethod);
-      if (c === 'never') deny(`CDP 方法 ${p.cdpMethod} 不对 agent 开放 (只能操作本标签及其子框架)。`);
-      if (c === 'sensitive' && !fullMode()) needFull(p.cdpMethod);
-      return checkDebuggee(p);
-    }
-    case 'cdp.attach':
-      return checkDebuggee(p);
+      return `chrome.${p.path}`;
+    case 'tabs.create':
+      return `新标签 ${cut(p.url) || ''}`;
+    case 'tabs.close':
+      return `关闭标签 ${p.tabId}`;
+    case 'events.subscribe':
+      return `订阅 ${p.path}`;
+    default:
+      return method;
   }
 }
 
@@ -186,14 +144,15 @@ const LOG_MAX = 300;
 const activity = [];
 
 function logActivity(conn, method, p, outcome) {
-  if (method === 'ping' || method === 'bridge.status' || method === 'tabs.list' || method === 'events.list') return;
+  // 频繁的只读查询成功时不记, 免得刷屏; 被拒或出错的照记
+  if (outcome === 'ok' && (method === 'ping' || method === 'bridge.status' || method === 'tabs.list' || method === 'events.list')) return;
   activity.push({
     at: Date.now(),
     agent: conn.info.agent?.label || '未识别的 agent',
     port: conn.port,
-    what: Policy.summarize(method, p),
+    what: summarize(method, p),
     tabId: p.tabId,
-    outcome, // 'ok' | 'denied' | 'error'
+    outcome, // 'ok' | 'paused' | 'error'
   });
   if (activity.length > LOG_MAX) activity.shift();
 }
@@ -311,12 +270,12 @@ async function onCommand(conn, msg) {
   if (!msg || msg.id === undefined) return;
   const p = msg.params || {};
   try {
-    await gate(msg.method, p);
+    await gate(msg.method);
     const result = await handle(msg.method, p, conn);
     logActivity(conn, msg.method, p, 'ok');
     send(conn, { id: msg.id, ok: true, result });
   } catch (e) {
-    logActivity(conn, msg.method, p, e instanceof Denied ? 'denied' : 'error');
+    logActivity(conn, msg.method, p, e instanceof Paused ? 'paused' : 'error');
     send(conn, { id: msg.id, ok: false, error: String((e && e.message) || e) });
   }
 }
@@ -353,7 +312,7 @@ function status(conn) {
 // 角标优先级: 待配对数 > 暂停 > 完全模式
 function refreshBadge() {
   const n = pendingConns().length;
-  const [text, color] = n ? [String(n), '#d4790b'] : settings.paused ? ['OFF', '#777777'] : fullMode() ? ['ALL', '#c62828'] : ['', '#d4790b'];
+  const [text, color] = n ? [String(n), '#d4790b'] : settings.paused ? ['OFF', '#777777'] : ['', '#d4790b'];
   chrome.action.setBadgeText({ text });
   chrome.action.setBadgeBackgroundColor({ color });
 }
@@ -386,7 +345,7 @@ async function popupStatus() {
   const online = new Set(readyConns().map((c) => c.side.sC));
   return {
     version: chrome.runtime.getManifest().version,
-    settings: publicSettings(),
+    settings: { ...settings },
     basePort: BASE_PORT,
     span: PORT_SPAN,
     sessions: readyConns().map((c) => ({ port: c.port, pid: c.info.pid, cwd: c.info.cwd, agent: c.info.agent?.label, tabs: [...attached.values()].filter((e) => e.owners.has(c)).length })),
@@ -447,14 +406,11 @@ async function handle(method, p, conn) {
       return tabs.map((t) => {
         const owners = attached.get('tab:' + t.id)?.owners;
         const mine = !!owners?.has(conn);
-        // 禁止站点的标签只露出域名, 标题与完整网址 (常含账号信息) 不给
-        const blocked = Policy.siteBlocked(t.url, settings.blockedSites);
         return {
           tabId: t.id,
           windowId: t.windowId,
-          title: blocked ? '(禁止站点)' : t.title,
-          url: blocked ? Policy.hostOf(t.url) : t.url,
-          ...(blocked ? { blocked: true } : {}),
+          title: t.title,
+          url: t.url,
           active: t.active,
           incognito: t.incognito,
           attached: mine,
@@ -549,6 +505,7 @@ async function ensureAttached(d, enableDomains, conn) {
   const e = attached.get(k);
   if (!e) throw new Error(k + ' 刚附加就被解除了 (标签关闭或用户点了取消), 请重试');
   e.owners.add(conn);
+  e.lastUsed = Date.now();
 }
 
 async function doAttach(d, enableDomains) {
@@ -625,12 +582,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => attached.delete('tab:' + tabId));
 
-// 已附加的标签跳到了禁止站点 (例如页面里的链接或脚本跳转): 立即放开
-chrome.tabs.onUpdated.addListener((tabId, change) => {
-  const k = 'tab:' + tabId;
-  const e = attached.get(k);
-  if (e && change.url && Policy.siteBlocked(change.url, settings.blockedSites)) realDetach(k, e.d, 'blocked_site');
-});
+
 
 // service worker 重启后, 上一代留下的附加已无人记账: 启动时统一解除.
 // detach 只能解除本扩展自己的附加, 不会误伤 DevTools 或别的扩展.
@@ -706,9 +658,16 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 });
 
 setInterval(scan, SCAN_MS);
+
+// 闲置自动放开: 一个标签 IDLE_DETACH_MS 内没有任何命令, 就解除调试, 黄条消失.
+// 下次对它发命令时会自动重新附加 (只是这段时间的网络记录会断开).
+const IDLE_DETACH_MS = 5 * 60000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, e] of [...attached]) if (now - (e.lastUsed || now) > IDLE_DETACH_MS) realDetach(k, e.d, 'idle');
+}, 30000);
 setInterval(() => {
   chrome.runtime.getPlatformInfo();
-  refreshBadge(); // 完全模式到期后角标随之消失
   for (const c of readyConns()) send(c, { event: 'ping' });
 }, KEEPALIVE_MS);
 
