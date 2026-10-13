@@ -23,7 +23,7 @@ function renderMode(st) {
   const left = st.fullModeUntil ? Math.max(0, Math.ceil((st.fullModeUntil - Date.now()) / 60000)) : 0;
   $('pauseBtn').textContent = st.paused ? '已暂停 · 点击恢复' : '暂停全部';
   $('pauseBtn').className = st.paused ? 'paused' : '';
-  $('fullBtn').textContent = left ? `完全模式 · 剩 ${left} 分钟 · 关闭` : '开启完全模式';
+  $('fullBtn').textContent = left ? `关闭完全模式 · ${left}分` : '开启完全模式';
   $('fullBtn').className = left ? 'active' : 'danger';
   $('modeMsg').className = 'msg ' + (left ? 'err' : '');
   $('modeMsg').textContent = st.paused
