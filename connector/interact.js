@@ -89,7 +89,7 @@ function pageScript(op, a) {
       top = inner;
     }
     const covered = top && top !== el && !el.contains(top) && !top.contains(el) ? clean(top.outerHTML, 120) : null;
-    return { x, y, covered, tag: el.tagName.toLowerCase(), name: nameOf(el) };
+    return { x, y, covered, hidden: document.visibilityState === 'hidden', tag: el.tagName.toLowerCase(), name: nameOf(el) };
   }
 
   switch (op) {
@@ -439,6 +439,8 @@ export function createInteract(cdp) {
       }
       const out = { clicked: info.name ? `${info.tag} "${info.name}"` : `(${Math.round(x)}, ${Math.round(y)})`, x: Math.round(x), y: Math.round(y) };
       if (info.covered) out.注意 = `该点被其他元素挡住, 点到的可能是它: ${info.covered}`;
+      // 用户窗口里的后台标签: Chrome 暂停渲染, 部分网站不响应. 把它移到独立的不抢焦点窗口即可
+      if (info.hidden) out.后台提示 = '该标签在后台 (页面 hidden), 点击可能无效。可用 chrome_api windows.create [{"tabId":<id>,"focused":false}] 把它移到独立窗口再操作, 或请用户切到这个标签。';
       return out;
     },
 

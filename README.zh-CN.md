@@ -33,7 +33,7 @@ agent ──stdio/MCP──▶ 连接器 (127.0.0.1:9333–9352) ◀══ 加�
 | 工具 | 作用 |
 |---|---|
 | `chrome_tabs` | 列出标签页。`attached` 表示本会话已附加；`otherSessions` 大于 0 表示有其他会话在用 |
-| `chrome_new_tab` / `chrome_close_tab` | 开、关标签页（`active:false` 在后台打开） |
+| `chrome_new_tab` / `chrome_close_tab` | 开、关标签页（`active:false` 开在专用的不抢焦点窗口里，页面照常渲染，不打扰你） |
 | `chrome_navigate` | 先附加再导航，然后等页面到达指定的 `readyState` |
 | `chrome_snapshot` | 列出页面上可交互的元素，每个带编号 `[ref]`（穿透 shadow DOM，标出视口外元素；`query` 按文字筛选） |
 | `chrome_click` | 按 ref / 选择器 / 坐标点击（真实鼠标事件，支持双击、右键），被遮挡时提示挡住它的元素 |

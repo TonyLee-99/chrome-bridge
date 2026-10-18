@@ -164,12 +164,13 @@ const TOOLS = [
   {
     name: 'chrome_new_tab',
     description:
-      '新建标签页并返回 tabId。不传 windowId 时总是开在普通 (非无痕) 窗口; 传 windowId 可开在指定窗口 (例如用 chrome_api 建的无痕窗口)。',
+      '新建标签页并返回 tabId。active:false 时开在本会话专用的后台窗口里 (不抢焦点, 页面照常渲染, 不打扰用户); ' +
+      '否则开在用户当前的普通窗口。传 windowId 可开在指定窗口 (例如用 chrome_api 建的无痕窗口)。',
     inputSchema: {
       type: 'object',
       properties: {
         url: { type: 'string', description: '缺省 about:blank' },
-        active: { type: 'boolean', description: '是否切到前台, 默认 true' },
+        active: { type: 'boolean', description: '默认 true 开在用户窗口前台; false 开在后台窗口, 不打扰用户' },
         windowId: { type: 'number' },
       },
     },
@@ -341,15 +342,42 @@ const text = (v) => ({
 
 // 「当前标签」: 本会话上一次操作 (或新开) 的标签. 工具省略 tabId 时用它, 省得每次都传
 let currentTab = null;
+
+// 后台标签: 开在用户窗口里的后台标签, Chrome 会把页面标成 hidden, 暂停渲染,
+// 图表不画、有些网站不响应点击. 所以 active:false 的标签改开在本会话专用的一个
+// 不抢焦点的独立窗口里 —— 页面是可见状态, 用户手上的窗口和标签也不受打扰.
+let agentWindow = null;
+
+async function openTab({ url = 'about:blank', active = true, windowId } = {}) {
+  if (active || windowId !== undefined) return callExt('tabs.create', { url, active, windowId });
+  if (agentWindow !== null) {
+    const r = await callExt('tabs.create', { url, active: true, windowId: agentWindow }).catch(() => null);
+    if (r) return { ...r, 说明: '开在 agent 专用的后台窗口里' };
+    agentWindow = null; // 窗口被用户关了
+  }
+  const w = await callExt('api.call', { path: 'windows.create', args: [{ url, focused: false, width: 1280, height: 900 }] });
+  agentWindow = w.id;
+  return { tabId: w.tabs[0].id, windowId: w.id, incognito: w.incognito, 说明: '开在 agent 专用的后台窗口里 (不抢焦点)' };
+}
+
+// 后台窗口里同时有几个标签时, 只有当前那个是可见的: 操作哪个就把它切到前面 (窗口本身不抢焦点)
+async function surface(tabId) {
+  if (agentWindow === null) return;
+  const t = await callExt('api.call', { path: 'tabs.get', args: [tabId] }).catch(() => null);
+  if (t && t.windowId === agentWindow && !t.active) await callExt('api.call', { path: 'tabs.update', args: [tabId, { active: true }] }).catch(() => {});
+}
 const TAB_TOOLS = new Set(['chrome_navigate', 'chrome_eval', 'chrome_screenshot', 'chrome_network', 'chrome_console', 'chrome_detach', 'chrome_close_tab', ...INTERACT_TOOLS.map((t) => t.name)]);
 
 async function dispatch(name, a = {}) {
   if (TAB_TOOLS.has(name) && a.tabId === undefined) {
     if (currentTab !== null) a.tabId = currentTab;
-    else if (name === 'chrome_navigate') a.tabId = (await callExt('tabs.create', { url: 'about:blank', active: a.active !== false })).tabId;
+    else if (name === 'chrome_navigate') a.tabId = (await openTab({ active: a.active !== false })).tabId;
     else throw new Error('还没有当前标签: 先 chrome_navigate 打开一个网址 (会自动新开标签), 或用 chrome_tabs 找到 tabId 后传进来');
   }
-  if (a.tabId !== undefined && name !== 'chrome_close_tab') currentTab = a.tabId;
+  if (a.tabId !== undefined && name !== 'chrome_close_tab') {
+    currentTab = a.tabId;
+    await surface(a.tabId);
+  }
   switch (name) {
     case 'chrome_tabs':
       return text(await callExt('tabs.list'));
@@ -358,7 +386,7 @@ async function dispatch(name, a = {}) {
       return text(await bridge.status());
 
     case 'chrome_new_tab': {
-      const r = await callExt('tabs.create', { url: a.url, active: a.active, windowId: a.windowId });
+      const r = await openTab({ url: a.url, active: a.active !== false, windowId: a.windowId });
       currentTab = r.tabId;
       return text(r);
     }
@@ -389,6 +417,8 @@ async function dispatch(name, a = {}) {
         expression: a.expression,
         returnByValue: true,
         awaitPromise: true,
+        // replMode: 和 DevTools 控制台一样, 允许顶层 await, 也允许重复声明 let/const
+        replMode: true,
         allowUnsafeEvalBlockedByCSP: true,
       });
       if (r?.exceptionDetails) {
@@ -518,6 +548,7 @@ const INSTRUCTIONS = `控制用户日常使用的 Chrome (默认 profile, 含其
 基本流程:
 1. 直接 chrome_navigate {url} —— 没有当前标签时自动新开一个; 之后的工具都可以省略 tabId, 默认作用于这个标签。
    要操作用户已经打开的某个页面: chrome_tabs 找到它的 tabId, 传一次即成为当前标签。
+   不想打扰用户时用 active:false: 标签开在专用的后台窗口里, 页面照常渲染。用户窗口里的后台标签会被 Chrome 暂停渲染 (图表不画、点击可能无效)。
 3. 看页面: chrome_snapshot 列出可交互元素及编号 [ref]; chrome_read 读正文; 需要看视觉效果时才 chrome_screenshot。
 4. 操作: chrome_click / chrome_type / chrome_key / chrome_scroll 按 ref 操作; 页面变化后重新 chrome_snapshot。chrome_wait_for 等元素或文字出现。
 5. 调试: chrome_eval 执行 JS; chrome_network (可读响应体) / chrome_console 读记录。

@@ -33,7 +33,7 @@ Apart from global tools like `chrome_tabs` and `chrome_status`, every tool's `ta
 | Tool | What it does |
 |---|---|
 | `chrome_tabs` | List tabs. `attached` = attached by this session; `otherSessions` > 0 = another session is using it |
-| `chrome_new_tab` / `chrome_close_tab` | Open and close tabs (`active:false` opens in the background) |
+| `chrome_new_tab` / `chrome_close_tab` | Open and close tabs (`active:false` opens in a dedicated unfocused window so the page keeps rendering without disturbing you) |
 | `chrome_navigate` | Attach, then navigate, then wait for a `readyState` |
 | `chrome_snapshot` | List interactive elements with refs (pierces shadow DOM, flags off-screen elements; `query` filters by text) |
 | `chrome_click` | Click by ref, selector or coordinates (real mouse events, double/right click); warns when the target is covered |

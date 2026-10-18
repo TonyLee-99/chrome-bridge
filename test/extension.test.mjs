@@ -103,6 +103,23 @@ try {
   const body = json(await tool('chrome_network', { tabId: tab.tabId, requestId: doc?.requestId, body: true }));
   check('读响应体', /点我/.test(body?.body || ''), body);
 
+  r = await tool('chrome_eval', { tabId: tab.tabId, expression: 'await new Promise((r) => setTimeout(r, 50)); 6 * 7' });
+  check('chrome_eval 支持顶层 await', r.text === '42', r.text);
+  const bgTab = json(await tool('chrome_new_tab', { url: pageUrl, active: false }));
+  await sleep(800);
+  const vis = await tool('chrome_eval', { tabId: bgTab.tabId, expression: 'document.visibilityState' });
+  check('后台标签开在独立窗口里, 页面处于可见状态', vis.text === 'visible', vis.text);
+  await tool('chrome_click', { tabId: bgTab.tabId, selector: '#b' });
+  const bgClicked = await tool('chrome_eval', { tabId: bgTab.tabId, expression: `document.getElementById('b').textContent` });
+  check('后台标签里点击生效', bgClicked.text === '已点', bgClicked.text);
+  const bgWin = json(await tool('chrome_api', { path: 'tabs.get', args: [bgTab.tabId] }))?.windowId;
+  // 用户窗口 = 弹窗页 (模拟用户打开的标签) 所在的窗口
+  const userWin = (json(await tool('chrome_tabs')) || []).find((t) => String(t.url).startsWith('chrome-extension://'))?.windowId;
+  const bgWinInfo = json(await tool('chrome_api', { path: 'windows.get', args: [bgWin] }));
+  check('后台标签开在独立、不抢焦点的窗口里', bgWin && userWin && bgWin !== userWin && bgWinInfo?.focused === false, `${bgWin} vs ${userWin}, focused=${bgWinInfo?.focused}`);
+  await tool('chrome_close_tab', { tabId: bgTab.tabId });
+  await tool('chrome_eval', { tabId: tab.tabId, expression: '1' }); // 当前标签切回主测试标签
+
   // 3. 全部开放
   r = await tool('chrome_api', { path: 'cookies.getAll', args: [{ domain: '127.0.0.1' }] });
   check('cookies.getAll 直接可用', !r.err && /secret123/.test(r.text), r.text);
