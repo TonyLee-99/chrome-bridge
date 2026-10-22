@@ -164,7 +164,7 @@ const TOOLS = [
   {
     name: 'chrome_new_tab',
     description:
-      '新建标签页并返回 tabId。active:false 时开在本会话专用的后台窗口里 (不抢焦点, 页面照常渲染, 不打扰用户); ' +
+      '新建标签页并返回 tabId。active:false 时开在本会话专用的后台窗口里 (自动最小化, 不出现在用户屏幕上; 截图时临时恢复); ' +
       '否则开在用户当前的普通窗口。传 windowId 可开在指定窗口 (例如用 chrome_api 建的无痕窗口)。',
     inputSchema: {
       type: 'object',
@@ -343,10 +343,33 @@ const text = (v) => ({
 // 「当前标签」: 本会话上一次操作 (或新开) 的标签. 工具省略 tabId 时用它, 省得每次都传
 let currentTab = null;
 
-// 后台标签: 开在用户窗口里的后台标签, Chrome 会把页面标成 hidden, 暂停渲染,
-// 图表不画、有些网站不响应点击. 所以 active:false 的标签改开在本会话专用的一个
-// 不抢焦点的独立窗口里 —— 页面是可见状态, 用户手上的窗口和标签也不受打扰.
+// 后台标签: active:false 的标签开在本会话专用的独立窗口里, 用户手上的窗口和标签不受打扰.
+// 这个窗口建好就最小化, 不出现在用户屏幕上 (macOS 上 windows.create 的 state:minimized
+// 会被忽略, 只能建完再最小化). 最小化时页面是 hidden: 加载、读取、点击、输入都正常,
+// 只有截图拿不到画面 —— 截图时临时恢复 (不抢焦点), 截完再最小化, 见 withRendering.
+// CHROME_BRIDGE_BACKGROUND=window 可改回不最小化 (图表等依赖渲染的页面更稳).
 let agentWindow = null;
+const MINIMIZE_AGENT_WINDOW = process.env.CHROME_BRIDGE_BACKGROUND !== 'window';
+
+const minimizeAgentWindow = () =>
+  MINIMIZE_AGENT_WINDOW && agentWindow !== null
+    ? callExt('api.call', { path: 'windows.update', args: [agentWindow, { state: 'minimized' }] }).catch(() => {})
+    : Promise.resolve();
+
+// 需要真实画面的操作 (截图): 标签在已最小化的后台窗口里时, 临时恢复窗口再执行
+async function withRendering(tabId, fn) {
+  if (agentWindow === null) return fn();
+  const t = await callExt('api.call', { path: 'tabs.get', args: [tabId] }).catch(() => null);
+  const w = t?.windowId === agentWindow ? await callExt('api.call', { path: 'windows.get', args: [agentWindow] }).catch(() => null) : null;
+  if (w?.state !== 'minimized') return fn();
+  await callExt('api.call', { path: 'windows.update', args: [agentWindow, { state: 'normal', focused: false }] });
+  await sleep(400); // 等页面恢复出帧
+  try {
+    return await fn();
+  } finally {
+    await minimizeAgentWindow();
+  }
+}
 
 async function openTab({ url = 'about:blank', active = true, windowId } = {}) {
   if (active || windowId !== undefined) return callExt('tabs.create', { url, active, windowId });
@@ -357,7 +380,8 @@ async function openTab({ url = 'about:blank', active = true, windowId } = {}) {
   }
   const w = await callExt('api.call', { path: 'windows.create', args: [{ url, focused: false, width: 1280, height: 900 }] });
   agentWindow = w.id;
-  return { tabId: w.tabs[0].id, windowId: w.id, incognito: w.incognito, 说明: '开在 agent 专用的后台窗口里 (不抢焦点)' };
+  await minimizeAgentWindow();
+  return { tabId: w.tabs[0].id, windowId: w.id, incognito: w.incognito, 说明: MINIMIZE_AGENT_WINDOW ? '开在 agent 专用的后台窗口里 (已最小化, 不打扰用户)' : '开在 agent 专用的后台窗口里 (不抢焦点)' };
 }
 
 // 后台窗口里同时有几个标签时, 只有当前那个是可见的: 操作哪个就把它切到前面 (窗口本身不抢焦点)
@@ -433,13 +457,15 @@ async function dispatch(name, a = {}) {
 
     case 'chrome_screenshot': {
       const format = a.format === 'png' ? 'png' : 'jpeg';
-      const params = await screenshotParams(cdp, a.tabId, {
-        fullPage: !!a.fullPage,
-        format,
-        quality: Math.min(Math.max(a.quality || 80, 1), 100),
-        maxWidth: a.maxWidth === undefined ? 1280 : a.maxWidth,
+      const r = await withRendering(a.tabId, async () => {
+        const params = await screenshotParams(cdp, a.tabId, {
+          fullPage: !!a.fullPage,
+          format,
+          quality: Math.min(Math.max(a.quality || 80, 1), 100),
+          maxWidth: a.maxWidth === undefined ? 1280 : a.maxWidth,
+        });
+        return cdp(a.tabId, 'Page.captureScreenshot', params);
       });
-      const r = await cdp(a.tabId, 'Page.captureScreenshot', params);
       if (!r?.data) return text({ 错误: '截图失败' });
       return { content: [{ type: 'image', data: r.data, mimeType: 'image/' + format }] };
     }
@@ -531,7 +557,15 @@ async function dispatch(name, a = {}) {
     }
 
     default:
-      if (interact[name]) return text(await interact[name](a));
+      if (interact[name]) {
+        const out = await interact[name](a);
+        // 后台窗口是故意最小化的, 点击输入照常有效, 不需要提示
+        if (out?.后台提示 && agentWindow !== null) {
+          const t = await callExt('api.call', { path: 'tabs.get', args: [a.tabId] }).catch(() => null);
+          if (t?.windowId === agentWindow) delete out.后台提示;
+        }
+        return text(out);
+      }
       throw new Error('未知工具: ' + name);
   }
 }
@@ -548,7 +582,8 @@ const INSTRUCTIONS = `控制用户日常使用的 Chrome (默认 profile, 含其
 基本流程:
 1. 直接 chrome_navigate {url} —— 没有当前标签时自动新开一个; 之后的工具都可以省略 tabId, 默认作用于这个标签。
    要操作用户已经打开的某个页面: chrome_tabs 找到它的 tabId, 传一次即成为当前标签。
-   不想打扰用户时用 active:false: 标签开在专用的后台窗口里, 页面照常渲染。用户窗口里的后台标签会被 Chrome 暂停渲染 (图表不画、点击可能无效)。
+   不想打扰用户时用 active:false: 标签开在专用的后台窗口里, 窗口自动最小化, 不出现在用户屏幕上。读取、点击、输入照常可用; 截图时会临时恢复窗口 (不抢焦点), 截完再最小化。
+   依赖动画渲染的页面 (图表等) 若迟迟不出内容, 可 chrome_api windows.update [windowId, {"state":"normal","focused":false}] 临时恢复。
 3. 看页面: chrome_snapshot 列出可交互元素及编号 [ref]; chrome_read 读正文; 需要看视觉效果时才 chrome_screenshot。
 4. 操作: chrome_click / chrome_type / chrome_key / chrome_scroll 按 ref 操作; 页面变化后重新 chrome_snapshot。chrome_wait_for 等元素或文字出现。
 5. 调试: chrome_eval 执行 JS; chrome_network (可读响应体) / chrome_console 读记录。

@@ -107,12 +107,15 @@ try {
   check('chrome_eval 支持顶层 await', r.text === '42', r.text);
   const bgTab = json(await tool('chrome_new_tab', { url: pageUrl, active: false }));
   await sleep(800);
-  const vis = await tool('chrome_eval', { tabId: bgTab.tabId, expression: 'document.visibilityState' });
-  check('后台标签开在独立窗口里, 页面处于可见状态', vis.text === 'visible', vis.text);
-  await tool('chrome_click', { tabId: bgTab.tabId, selector: '#b' });
-  const bgClicked = await tool('chrome_eval', { tabId: bgTab.tabId, expression: `document.getElementById('b').textContent` });
-  check('后台标签里点击生效', bgClicked.text === '已点', bgClicked.text);
   const bgWin = json(await tool('chrome_api', { path: 'tabs.get', args: [bgTab.tabId] }))?.windowId;
+  const bgState = json(await tool('chrome_api', { path: 'windows.get', args: [bgWin] }))?.state;
+  check('后台窗口建好后自动最小化', bgState === 'minimized', bgState);
+  const clickRes = json(await tool('chrome_click', { tabId: bgTab.tabId, selector: '#b' }));
+  const bgClicked = await tool('chrome_eval', { tabId: bgTab.tabId, expression: `document.getElementById('b').textContent` });
+  check('最小化的后台窗口里点击照常生效, 且不再提示"在后台"', bgClicked.text === '已点' && !clickRes?.后台提示, bgClicked.text + ' ' + JSON.stringify(clickRes));
+  const bgShot = await tool('chrome_screenshot', { tabId: bgTab.tabId });
+  const stateAfterShot = json(await tool('chrome_api', { path: 'windows.get', args: [bgWin] }))?.state;
+  check('截图时临时恢复窗口, 截完重新最小化', bgShot.type === 'image' && stateAfterShot === 'minimized', `${bgShot.type} ${stateAfterShot}`);
   // 用户窗口 = 弹窗页 (模拟用户打开的标签) 所在的窗口
   const userWin = (json(await tool('chrome_tabs')) || []).find((t) => String(t.url).startsWith('chrome-extension://'))?.windowId;
   const bgWinInfo = json(await tool('chrome_api', { path: 'windows.get', args: [bgWin] }));
